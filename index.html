@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Stickman Swords</title>
+<style>
+  html,body{margin:0;height:100%;background:#1b1d23;overflow:hidden;font-family:system-ui,sans-serif}
+  canvas{display:block;margin:0 auto;background:linear-gradient(#2b3040,#4a4f63);cursor:crosshair}
+  #help{position:fixed;bottom:8px;width:100%;text-align:center;color:#aab;font-size:13px}
+</style>
+</head>
+<body>
+<canvas id="c" width="1000" height="560"></canvas>
+<div id="help">A/D move · W / Space jump · S block · Click attack · R restart</div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height, GROUND = H - 70, G = 0.7;
+const keys = {};
+let mouseDown = false, particles = [], enemies = [], wave = 0, score = 0, gameOver = false, shake = 0;
+
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (['Space','KeyW'].includes(e.code)) { player.jump(); e.preventDefault(); }
+  if (e.code === 'KeyR' && gameOver) reset();
+});
+addEventListener('keyup', e => keys[e.code] = false);
+cv.addEventListener('mousedown', e => { mouseDown = true; player.attack(); });
+addEventListener('mouseup', () => mouseDown = false);
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+class Fighter {
+  constructor(x, color, isPlayer) {
+    Object.assign(this, { x, y: GROUND, vx: 0, vy: 0, color, isPlayer, face: 1,
+      hp: isPlayer ? 100 : 40 + wave * 8, maxHp: 0, atk: 0, atkCd: 0, hitSet: new Set(),
+      combo: 0, blocking: false, stun: 0, walk: 0, dead: false, deadT: 0 });
+    this.maxHp = this.hp;
+    this.speed = isPlayer ? 4.2 : 2 + Math.random() * 0.8 + wave * 0.1;
+  }
+  get onGround() { return this.y >= GROUND; }
+  jump() { if (this.onGround && !this.dead && !this.stun) this.vy = -14; }
+  attack() {
+    if (this.dead || this.atkCd > 0 || this.stun > 0) return;
+    this.combo = (this.atk > 0 || this.comboT > 0) ? (this.combo + 1) % 3 : 0;
+    this.atk = 18; this.atkCd = this.isPlayer ? 14 : 45; this.hitSet.clear(); this.comboT = 30;
+  }
+  // sword angle over the swing
+  swordAngle() {
+    if (this.atk > 0) {
+      const t = 1 - this.atk / 18;
+      if (this.combo === 2) return -0.1;           // thrust
+      const a = this.combo === 0 ? [-2.2, 1.0] : [1.0, -2.0];
+      return a[0] + (a[1] - a[0]) * Math.min(1, t * 1.6);
+    }
+    return this.blocking ? -1.4 : -0.6;
+  }
+  hand() {
+    const reach = this.atk > 0 && this.combo === 2 ? 26 + (1 - this.atk / 18) * 22 : 18;
+    return { x: this.x + this.face * reach, y: this.y - 62 };
+  }
+  tip() {
+    const h = this.hand(), a = this.swordAngle(), L = 55;
+    return { x: h.x + Math.cos(a) * L * this.face, y: h.y + Math.sin(a) * L };
+  }
+  hurt(dmg, dir) {
+    if (this.dead) return;
+    if (this.blocking && Math.sign(dir) === -this.face) {
+      dmg *= 0.15; this.vx = dir * 4; spark(this.x + this.face * 20, this.y - 60, '#ffd84a', 10);
+    } else {
+      this.vx = dir * 7; this.vy = -5; this.stun = 14;
+      blood(this.x, this.y - 55, this.color);
+    }
+    this.hp -= dmg; shake = Math.max(shake, 6);
+    if (this.hp <= 0) { this.hp = 0; this.dead = true; this.vy = -8; if (!this.isPlayer) score += 100; }
+  }
+  update() {
+    if (this.dead) { this.deadT++; }
+    this.atk = Math.max(0, this.atk - 1); this.atkCd = Math.max(0, this.atkCd - 1);
+    this.stun = Math.max(0, this.stun - 1); this.comboT = Math.max(0, (this.comboT||0) - 1);
+    this.vy += G; this.x += this.vx; this.y += this.vy;
+    if (this.y > GROUND) { this.y = GROUND; this.vy = 0; }
+    this.vx *= this.onGround ? 0.75 : 0.95;
+    this.x = Math.max(20, Math.min(W - 20, this.x));
+    if (Math.abs(this.vx) > 0.5 && this.onGround) this.walk += 0.25 * Math.sign(this.vx) * this.face;
+    // hit detection during active swing frames
+    if (this.atk > 3 && this.atk < 15 && !this.dead) {
+      const tip = this.tip(), h = this.hand();
+      const targets = this.isPlayer ? enemies : [player];
+      for (const t of targets) {
+        if (t.dead || this.hitSet.has(t)) continue;
+        for (let s = 0; s <= 1; s += 0.25) {
+          const px = h.x + (tip.x - h.x) * s, py = h.y + (tip.y - h.y) * s;
+          if (Math.abs(px - t.x) < 16 && py > t.y - 95 && py < t.y) {
+            this.hitSet.add(t);
+            const dmg = this.isPlayer ? (this.combo === 2 ? 22 : 14) : 8 + wave;
+            t.hurt(dmg, this.face); break;
+          }
+        }
+      }
+    }
+  }
+  draw() {
+    ctx.save();
+    ctx.strokeStyle = this.color; ctx.lineWidth = 4; ctx.lineCap = 'round';
+    let x = this.x, y = this.y;
+    if (this.dead) {
+      ctx.translate(x, y); ctx.rotate(-this.face * Math.min(Math.PI / 2, this.deadT * 0.1));
+      ctx.translate(-x, -y); ctx.globalAlpha = Math.max(0, 1 - (this.deadT - 60) / 40);
+    }
+    const crouch = this.blocking ? 6 : 0;
+    const hipY = y - 40 + crouch, neckY = y - 78 + crouch, headY = y - 92 + crouch;
+    const sw = Math.sin(this.walk) * 14, air = !this.onGround;
+    // legs
+    line(x, hipY, x + (air ? -8 : sw), y);
+    line(x, hipY, x + (air ? 12 : -sw), air ? y - 10 : y);
+    // body
+    line(x, hipY, x, neckY);
+    // head
+    ctx.beginPath(); ctx.arc(x, headY, 13, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = this.color; ctx.fillRect(x + this.face * 4 - 2, headY - 3, 4, 4);
+    // back arm
+    line(x, neckY + 6, x - this.face * 14, neckY + 28);
+    // sword arm
+    const h = this.hand(); h.y += crouch;
+    line(x, neckY + 6, h.x, h.y);
+    // sword
+    const a = this.swordAngle(), L = 55;
+    const tx = h.x + Math.cos(a) * L * this.face, ty = h.y + Math.sin(a) * L;
+    ctx.strokeStyle = '#dfe6f0'; ctx.lineWidth = 3; line(h.x, h.y, tx, ty);
+    ctx.strokeStyle = '#a07a3a'; ctx.lineWidth = 5;
+    const px = -Math.sin(a) * 8 * this.face, py = Math.cos(a) * 8;
+    line(h.x - px, h.y - py, h.x + px, h.y + py);
+    // swing trail
+    if (this.atk > 3 && this.atk < 15) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 10;
+      ctx.beginPath(); ctx.arc(h.x, h.y, L * 0.8, 0, 0); ctx.moveTo(h.x, h.y); ctx.lineTo(tx, ty); ctx.stroke();
+    }
+    ctx.restore();
+    // hp bar for enemies
+    if (!this.isPlayer && !this.dead) {
+      ctx.fillStyle = '#300'; ctx.fillRect(x - 20, y - 118, 40, 5);
+      ctx.fillStyle = '#e44'; ctx.fillRect(x - 20, y - 118, 40 * this.hp / this.maxHp, 5);
+    }
+  }
+}
+function line(a, b, c, d) { ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c, d); ctx.stroke(); }
+function spark(x, y, col, n) { for (let i = 0; i < n; i++) particles.push({ x, y, vx: (Math.random() - .5) * 8, vy: (Math.random() - .8) * 7, life: 25, col }); }
+function blood(x, y, col) { spark(x, y, '#d33', 14); }
+
+function aiUpdate(e) {
+  if (e.dead || e.stun || player.dead) { e.blocking = false; return; }
+  const dx = player.x - e.x, dist = Math.abs(dx);
+  if (e.atk === 0) e.face = Math.sign(dx) || 1;
+  e.blocking = player.atk > 8 && dist < 110 && Math.random() < 0.02 + wave * 0.01 ? true : (e.blocking && player.atk > 0);
+  if (dist > 70) e.vx += Math.sign(dx) * e.speed * 0.25;
+  else if (dist < 40) e.vx -= Math.sign(dx) * 0.6;
+  if (dist < 85 && !e.blocking && Math.random() < 0.04) e.attack();
+  if (player.y < GROUND - 60 && dist < 100 && Math.random() < 0.02) e.jump();
+  e.vx = Math.max(-e.speed, Math.min(e.speed, e.vx));
+  // separation
+  for (const o of enemies) if (o !== e && !o.dead && Math.abs(o.x - e.x) < 30) e.vx += Math.sign(e.x - o.x || 1) * 0.5;
+}
+
+let player;
+const COLORS = ['#ff6b6b', '#ffa94d', '#b197fc', '#63e6be', '#ff8cc6'];
+function nextWave() {
+  wave++;
+  const n = Math.min(1 + Math.floor(wave / 2), 5);
+  for (let i = 0; i < n; i++) {
+    const side = i % 2 ? -60 : W + 60;
+    const e = new Fighter(side + (i * 30) * (i % 2 ? -1 : 1), COLORS[(wave + i) % COLORS.length], false);
+    e.x = Math.max(20, Math.min(W - 20, side === -60 ? 30 + i * 20 : W - 30 - i * 20));
+    enemies.push(e);
+  }
+}
+function reset() {
+  wave = 0; score = 0; gameOver = false; enemies = []; particles = [];
+  player = new Fighter(W / 2, '#e8f0ff', true); nextWave();
+}
+reset();
+
+function update() {
+  const p = player;
+  if (!p.dead && !p.stun) {
+    p.blocking = !!keys.KeyS && p.onGround && p.atk === 0;
+    const spd = p.blocking ? 1.2 : p.speed;
+    if (keys.KeyA) { p.vx = -spd; if (!p.atk) p.face = -1; }
+    if (keys.KeyD) { p.vx = spd; if (!p.atk) p.face = 1; }
+    if (mouseDown && p.atkCd === 0) p.attack();
+  }
+  p.update();
+  enemies.forEach(e => { aiUpdate(e); e.update(); });
+  enemies = enemies.filter(e => e.deadT < 100);
+  if (enemies.every(e => e.dead) && !gameOver) { if (!enemies.length) nextWave(); }
+  if (p.dead && p.deadT > 50) gameOver = true;
+  particles.forEach(q => { q.x += q.vx; q.y += q.vy; q.vy += 0.35; q.life--; });
+  particles = particles.filter(q => q.life > 0);
+  shake *= 0.85;
+}
+
+function draw() {
+  ctx.save();
+  ctx.clearRect(0, 0, W, H);
+  ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
+  // moon & ground
+  ctx.fillStyle = '#e9e4c9'; ctx.beginPath(); ctx.arc(820, 90, 40, 0, 7); ctx.fill();
+  ctx.fillStyle = '#23262f'; ctx.fillRect(-10, GROUND, W + 20, H - GROUND + 10);
+  ctx.fillStyle = '#353a48'; ctx.fillRect(-10, GROUND, W + 20, 4);
+  enemies.forEach(e => e.draw()); player.draw();
+  particles.forEach(q => { ctx.fillStyle = q.col; ctx.globalAlpha = q.life / 25; ctx.fillRect(q.x, q.y, 4, 4); });
+  ctx.globalAlpha = 1; ctx.restore();
+  // HUD
+  ctx.fillStyle = '#400'; ctx.fillRect(20, 20, 250, 18);
+  ctx.fillStyle = '#4ade80'; ctx.fillRect(20, 20, 250 * player.hp / player.maxHp, 18);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.strokeRect(20, 20, 250, 18);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 18px system-ui';
+  ctx.fillText(`Wave ${wave}`, 20, 62); ctx.textAlign = 'right'; ctx.fillText(`Score ${score}`, W - 20, 34); ctx.textAlign = 'left';
+  if (gameOver) {
+    ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = 'bold 56px system-ui';
+    ctx.fillText('DEFEATED', W / 2, H / 2 - 10); ctx.font = '22px system-ui';
+    ctx.fillText(`Wave ${wave} · Score ${score} · Press R to restart`, W / 2, H / 2 + 30); ctx.textAlign = 'left';
+  }
+}
+(function loop() { update(); draw(); requestAnimationFrame(loop); })();
+</script>
+</body>
+</html>
